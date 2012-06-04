@@ -151,6 +151,8 @@ while True:
 		
 		if i == 0:
 			bpm = hm.get_bpm()
+			open("log","a").write(str(bpm) + "\n")
+			
 			i = 1
 			
 			if len(hm.bins) > 0:
