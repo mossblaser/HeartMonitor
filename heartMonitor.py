@@ -117,8 +117,13 @@ face = None
 font = cv.InitFont(cv.CV_FONT_HERSHEY_SIMPLEX, 1, 1, 0, 3, 8) 
 i = 30
 ffts = []
+bpmh = []
 bpm = 0.0
- 
+
+show_face = False
+show_bpm = False
+show_fft = False
+
 while True:
 	frame = cam.get_frame()
 	if frame:
@@ -129,6 +134,10 @@ while True:
 				while not frame:
 					frame = cam.get_frame()
 		x,y,w,h = face[0]
+		
+		if show_face:
+			cv.Rectangle(frame, tuple(map(int, (x,y))), tuple(map(int, (x+w, y+h))), (0,255,255))
+		
 		w /= 2
 		h /= 3
 		x += w/2
@@ -142,15 +151,22 @@ while True:
 		cv.SetImageROI(frame, (x,y,w,h))
 		hm.add(time.time(), cv.Avg(frame)[1])
 		cv.ResetImageROI(frame)
-		cv.Rectangle(frame, tuple(map(int, (x,y))), tuple(map(int, (x+w, y+h))), (0,255,0))
-		cv.PutText(frame, "%0.1f"%bpm, (x,y), font, (0,255,0))
+		if show_face:
+			cv.Rectangle(frame, tuple(map(int, (x,y))), tuple(map(int, (x+w, y+h))), (0,255,0))
+		
+		if show_bpm:
+			cv.PutText(frame, "%0.0f"%bpm, (x,y), font, (0,255,0))
 		
 		if ffts:
-			colour = (0,255,0) if hm.full else (0,0,255)
-			cv.PolyLine(frame, [ffts], False, colour, 3)
+			if show_fft:
+				colour = (0,255,0) if hm.full else (0,0,255)
+				cv.PolyLine(frame, [ffts], False, colour, 3)
 		
 		if i == 0:
-			bpm = hm.get_bpm()
+			bpmh.append(hm.get_bpm())
+			if len(bpmh) > 100:
+				bpmh.pop(0)
+			bpm = sum(bpmh) / len(bpmh)
 			open("log","a").write(str(bpm) + "\n")
 			
 			i = 1
@@ -174,5 +190,13 @@ while True:
 		hm.time = []
 		ffts = []
 		i = 30
+		face = None
+		bpm = 0
 	elif key == ord(" "):
 		face = None
+	elif key == ord("1"):
+		show_face = not show_face
+	elif key == ord("2"):
+		show_fft = not show_fft
+	elif key == ord("3"):
+		show_bpm = not show_bpm
