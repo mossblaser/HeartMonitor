@@ -275,6 +275,8 @@ class Annotator(object):
 	PULSE_SIZE = (9,12)        # Size of the pluse-blob (normal, on pulse)
 	PULSE_PHASE = numpy.pi / 4 # Phase during which pulse occurs
 	
+	SMALL_PULSE_SIZE = 6 # Size of the small pluse-blob
+	
 	HEAD_WIDTH_SCALE = 0.8 # Scale head width for appearence's sake
 	
 	FFT_HEIGHT = 0.4 # Height of the FFT on the image
@@ -328,8 +330,8 @@ class Annotator(object):
 		x,y,w,h = self.metrics
 		c = self.get_colour()
 		
-		cv.PutText(frame, "%0.1f"%bpm, (x,y), self.large_font_outline, c[1])
-		cv.PutText(frame, "%0.1f"%bpm, (x,y), self.large_font, c[0])
+		cv.PutText(frame, "%0.0f"%bpm, (x,y), self.large_font_outline, c[1])
+		cv.PutText(frame, "%0.0f"%bpm, (x,y), self.large_font, c[0])
 	
 	
 	def draw_phase(self, frame, phase):
@@ -370,7 +372,7 @@ class Annotator(object):
 		cv.Rectangle(frame, (int(x),int(y)), (int(x+w),int(y+h)), c, Annotator.THIN)
 	
 	
-	def draw_fft(self, frame, fft_data):
+	def draw_fft(self, frame, fft_data, min_bpm, max_bpm):
 		w = frame.width
 		h = int(frame.height * Annotator.FFT_HEIGHT)
 		x = 0
@@ -378,25 +380,30 @@ class Annotator(object):
 		
 		max_magnitude = max(d[1][0] for d in fft_data)
 		
-		line = []
-		for num, data in enumerate(fft_data):
-			point_x = (w * num) / (len(fft_data) - 1)
-			point_y = int(y - ((h * data[1][0]) / max_magnitude))
-			
-			line.append((point_x, point_y))
+		def get_position(i):
+			point_x = int(w * (float(fft_data[i][0] - min_bpm) / float(max_bpm - min_bpm)))
+			point_y = int(y - ((h * fft_data[i][1][0]) / max_magnitude))
+			return point_x, point_y
+		
+		line = [get_position(i) for i in range(len(fft_data))]
 		
 		cv.PolyLine(frame, [line], False, self.get_colour()[0], 3)
 		
 		# Label the largest bin
 		max_bin = max(range(len(fft_data)), key=(lambda i: fft_data[i][1][0]))
 		
-		x = (w * max_bin) / (len(fft_data) - 1)
-		y = int(y - ((h * fft_data[max_bin][1][0]) / max_magnitude))
+		x,y = get_position(max_bin)
 		c = self.get_colour()
 		text = "%0.1f"%fft_data[max_bin][0]
 		
 		cv.PutText(frame, text, (x,y), self.small_font_outline, c[1])
 		cv.PutText(frame, text, (x,y), self.small_font, c[0])
+		
+		# Pulse ring
+		r = Annotator.SMALL_PULSE_SIZE
+		phase = int(((fft_data[max_bin][1][1] % (2*numpy.pi)) / numpy.pi) * 180)
+		cv.Ellipse(frame, (int(x-(r*1.5)),int(y-r)), (int(r),int(r)), 0, 90, 90-phase, c[1], Annotator.THIN+Annotator.BORDER)
+		cv.Ellipse(frame, (int(x-(r*1.5)),int(y-r)), (int(r),int(r)), 0, 90, 90-phase, c[0], Annotator.THIN)
 		
 
 
@@ -469,7 +476,9 @@ class Program(object):
 				
 				# Draw the OSD
 				if fft_data and self.show_fft:
-					self.annotator.draw_fft(frame, fft_data)
+					self.annotator.draw_fft(frame, fft_data,
+					                        self.heart_monitor.min_bpm,
+					                        self.heart_monitor.max_bpm)
 				
 				if self.show_face:
 					self.annotator.draw_face(frame)
