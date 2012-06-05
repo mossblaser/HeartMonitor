@@ -4,7 +4,6 @@ import cv
 import numpy
 import pylab
 import time
-from colorsys import rgb_to_hsv
 
 class Camera(object):
 	
@@ -13,12 +12,31 @@ class Camera(object):
 		A simple web-cam wrapper.
 		"""
 		self.cam = cv.CaptureFromCAM(camera)
+		
+		if not self.cam:
+			raise Exception("Camera not accessible.")
+	
 	
 	def get_frame(self):
 		"""
-		Return the most recent image from the webcam
+		Return the most recent (successful) image from the webcam
 		"""
-		return cv.QueryFrame(self.cam)
+		frame = None
+		while not frame:
+			frame = cv.QueryFrame(self.cam)
+		
+		return frame
+	
+	
+	def get_fps(self):
+		fps = cv.GetCaptureProperty(self.cam, cv.CV_CAP_PROP_FPS)
+		return fps if fps != -1 else 30.0
+	
+	
+	def get_size(self):
+		w = int(cv.GetCaptureProperty(self.cam, cv.CV_CAP_PROP_FRAME_WIDTH))
+		h = int(cv.GetCaptureProperty(self.cam, cv.CV_CAP_PROP_FRAME_HEIGHT))
+		return (w,h)
 
 
 class FaceDetector(object):
@@ -100,8 +118,8 @@ class HeartMonitor(object):
 	
 	def get_fft(self):
 		"""
-		Perform an Fast-Fourier-Transform on the buffer and return the magnitude of
-		the bins.
+		Perform an Fast-Fourier-Transform on the buffer and return (magnitude,
+		phase) tuples for each of the bins.
 		"""
 		# Get the "ideal" evenly spaced times
 		even_times = numpy.linspace(self.buf[0][0], self.buf[-1][0], len(self.buf))
@@ -110,7 +128,8 @@ class HeartMonitor(object):
 		interpolated = numpy.interp(even_times, *zip(*self.buf))
 		
 		# Perform the FFT
-		return numpy.abs(numpy.fft.rfft(interpolated))
+		fft = numpy.fft.rfft(interpolated)
+		return zip(numpy.abs(fft), numpy.angle(fft))
 	
 	
 	def bin_to_bpm(self, bin):
@@ -133,8 +152,8 @@ class HeartMonitor(object):
 	
 	def get_bpm(self):
 		"""
-		Get the current beats-per-minute and the band of FFT data within the allowed
-		heart-rate range as a list of (bpm, amplitude) tuples.
+		Get the current beats-per-minute, the phase and the band of FFT data within
+		the allowed heart-rate range as a list of (bpm, (magnitude,phase)) tuples.
 		"""
 		
 		fft = self.get_fft()
@@ -145,20 +164,29 @@ class HeartMonitor(object):
 		max_bin = self.bpm_to_bin(self.max_bpm)
 		
 		# Find the bin with the highest intensity (the heartbeat)
-		best_bin = max(range(min_bin, max_bin),
-		               key=(lambda i: fft[i-1]))
+		if min_bin == max_bin:
+			best_bin = min_bin
+		else:
+			best_bin = max(range(min_bin, max_bin),
+			               key=(lambda i: fft[i-1][0]))
 		heartrate = self.bin_to_bpm(best_bin)
+		phase     = fft[best_bin-1][1]
 		
 		# Produce the FFT data in the format described above
 		fft_data = zip((self.bin_to_bpm(b) for b in range(min_bin, max_bin+1)),
 		               fft[min_bin-1:max_bin])
 		
-		return heartrate, fft_data
+		return heartrate, phase, fft_data
 	
 	
 	@property
 	def buf_full(self):
 		return len(self.buf) >= self.buf_size
+	
+	
+	@property
+	def ready(self):
+		return len(self.buf) >= 2
 	
 	
 	def add_sample(self, time, value):
@@ -178,98 +206,317 @@ class HeartMonitor(object):
 		self.buf = []
 
 
-cam = Camera(0)
-cv.NamedWindow("w1")#, cv.CV_WINDOW_AUTO_SIZE)
-
-fd = FaceDetector(640,480)
-
-hm = HeartMonitor(10)
-
-face = None
-font = cv.InitFont(cv.CV_FONT_HERSHEY_SIMPLEX, 1, 1, 0, 3, 8) 
-i = 30
-ffts = []
-bpmh = []
-bpm = 0.0
-
-show_face = False
-show_bpm = False
-show_fft = False
-
-while True:
-	frame = cam.get_frame()
-	if frame:
-		while not face:
-			face = fd.get_best_face(frame)
-			if not face:
-				frame = None
-				while not frame:
-					frame = cam.get_frame()
-		x,y,w,h = face[0]
-		
-		if show_face:
-			cv.Rectangle(frame, tuple(map(int, (x,y))), tuple(map(int, (x+w, y+h))), (0,255,255))
-		
-		w /= 2
-		h /= 3
-		x += w/2
-		#y += h/2
-		
-		w /= 2
-		h /= 2
-		x += w/2
-		y += h/4
-		
-		cv.SetImageROI(frame, (x,y,w,h))
-		hm.add_sample(time.time(), cv.Avg(frame)[1])
-		cv.ResetImageROI(frame)
-		if show_face:
-			cv.Rectangle(frame, tuple(map(int, (x,y))), tuple(map(int, (x+w, y+h))), (0,255,0))
-		
-		if show_bpm:
-			cv.PutText(frame, "%0.0f"%bpm, (x,y), font, (0,255,0))
-		
-		if ffts:
-			if show_fft:
-				colour = (0,255,0) if hm.buf_full else (0,0,255)
-				cv.PolyLine(frame, [ffts], False, colour, 3)
-		
-		if i == 0:
-			bpm, fft_data = hm.get_bpm()
-			bpmh.append(bpm)
-			if len(bpmh) > 100:
-				bpmh.pop(0)
-			bpm = sum(bpmh) / len(bpmh)
-			open("log","a").write(str(bpm) + "\n")
-			
-			i = 1
-			
-			if len(fft_data) > 0:
-				ffts = []
-				for num,data in enumerate(fft_data):
-					_, value = data
-					ffts.append((int(640*(float(num)/len(fft_data))), 
-					             240+(240-int(240*(float(value)/max((d[1] for d in fft_data)))))))
-		i-= 1
-		
-		cv.ShowImage("w1", frame)
-	else:
-		print "Failed frame."
+class FaceTracker(object):
 	
-	key = cv.WaitKey(10) & 255
-	if key == 27:
-		break
-	elif key == ord("r"):
-		hm.reset()
-		ffts = []
-		i = 30
-		face = None
-		bpm = 0
-	elif key == ord(" "):
-		face = None
-	elif key == ord("1"):
-		show_face = not show_face
-	elif key == ord("2"):
-		show_fft = not show_fft
-	elif key == ord("3"):
-		show_bpm = not show_bpm
+	def __init__(self, frame, face_position,
+	             fh_x = 0.5,  fh_y = 0.13,
+	             fh_w = 0.25, fh_h = 0.15):
+		"""
+		A motion tracker that can track a face (and forehead). Note: This class
+		simply provides the interface but doesn't actually track the face as it
+		moves.
+		@param frame         The first frame containing the face
+		@param face_position The position of the face in the frame
+		@param fh_x          The x-position on the face of the center of the forehead
+		@param fh_y          The y-position on the face of the center of the forehead
+		@param fh_w          The width, relative to the face, of the forehead
+		@param fh_h          The height, relative to the face, of the forehead
+		"""
+		
+		self.face_position = face_position
+		
+		self.fh_x = fh_x
+		self.fh_y = fh_y
+		self.fh_w = fh_w
+		self.fh_h = fh_h
+	
+	
+	def update(self, time, frame, face_position = None):
+		"""
+		Add a new frame. Will override the face position if specified.
+		"""
+		self.face_position = face_position or self.face_position
+	
+	
+	def get_face(self):
+		return self.face_position
+	
+	
+	def get_forehead(self):
+		"""
+		Get the position of the forehead as tracked by the MotionTracker
+		"""
+		x,y,w,h = self.get_face()
+		
+		x += w * self.fh_x
+		y += h * self.fh_y
+		w *= self.fh_w
+		h *= self.fh_h
+		
+		x -= (w / 2.0)
+		y -= (h / 2.0)
+		
+		return (x,y,w,h)
+
+
+class Annotator(object):
+	
+	THICK  = 3 # Thick line width
+	THIN   = 1 # Thin line width
+	BORDER = 2 # Additional width for outlines
+	
+	# Colour (Fill, Outline)
+	COLOUR_OK   = ((0,255,0), (0,0,0))
+	COLOUR_BUSY = ((0,0,255), (0,0,0))
+	
+	COLOUR_FACE     = (0,255,255)
+	COLOUR_FOREHEAD = (0,255,0)
+	
+	PULSE_SIZE = (9,12)        # Size of the pluse-blob (normal, on pulse)
+	PULSE_PHASE = numpy.pi / 4 # Phase during which pulse occurs
+	
+	HEAD_WIDTH_SCALE = 0.8 # Scale head width for appearence's sake
+	
+	FFT_HEIGHT = 0.4 # Height of the FFT on the image
+	
+	
+	def __init__(self):
+		"""
+		Can annotate various features onto frames.
+		"""
+		# Setup fonts
+		self.large_font = self._get_font(1,Annotator.THICK)
+		self.large_font_outline = self._get_font(1,Annotator.THICK + Annotator.BORDER)
+		
+		self.small_font = self._get_font(0.5,Annotator.THIN)
+		self.small_font_outline = self._get_font(0.5,Annotator.THIN + Annotator.BORDER)
+		
+		# Text colour
+		self.colour = Annotator.COLOUR_BUSY
+		
+		self.forehead = (0,0,1,1)
+		self.face     = (0,0,1,1)
+	
+	
+	def _get_font(self, size=1, weight=1, italic=0):
+		return cv.InitFont(cv.CV_FONT_HERSHEY_SIMPLEX,
+		                   size, size, italic, weight) 
+	
+	
+	def set_busy(self, busy):
+		self.colour = Annotator.COLOUR_OK if not busy else Annotator.COLOUR_BUSY
+	
+	
+	def set_forehead(self, forehead):
+		self.forehead = tuple(map(int, forehead))
+	
+	def set_face(self, face):
+		self.face = tuple(map(int, face))
+	
+	@property
+	def metrics(self):
+		x,_,w,h = map(int, self.forehead)
+		_,y,_,_ = map(int, self.face)
+		return (x,y,w,h)
+	
+	
+	def get_colour(self):
+		return self.colour
+	
+	
+	def draw_bpm(self, frame, bpm):
+		x,y,w,h = self.metrics
+		c = self.get_colour()
+		
+		cv.PutText(frame, "%0.1f"%bpm, (x,y), self.large_font_outline, c[1])
+		cv.PutText(frame, "%0.1f"%bpm, (x,y), self.large_font, c[0])
+	
+	
+	def draw_phase(self, frame, phase):
+		x,y,w,h = self.metrics
+		c = self.get_colour()
+		
+		x -= int(Annotator.PULSE_SIZE[1] * 1.5)
+		y -= Annotator.PULSE_SIZE[1]
+		
+		if (phase % (2.0 * numpy.pi)) < Annotator.PULSE_PHASE:
+			radius = Annotator.PULSE_SIZE[1]
+		else:
+			radius = Annotator.PULSE_SIZE[0]
+		
+		cv.Circle(frame, (x,y), radius + Annotator.BORDER, c[1], -1)
+		cv.Circle(frame, (x,y), radius, c[0], -1)
+	
+	
+	def draw_face(self, frame):
+		x,y,w,h = self.face
+		
+		# Center of the face
+		x += w/2
+		y += h/2
+		
+		# Slightly narrow the elipse to fit most faces better
+		w *= Annotator.HEAD_WIDTH_SCALE
+		
+		c = Annotator.COLOUR_FACE
+		
+		cv.Ellipse(frame, (int(x),int(y)), (int(w/2),int(h/2)), 0, 0, 360, c, Annotator.THIN)
+	
+	
+	def draw_forehead(self, frame):
+		x,y,w,h = self.forehead
+		c = Annotator.COLOUR_FOREHEAD
+		
+		cv.Rectangle(frame, (int(x),int(y)), (int(x+w),int(y+h)), c, Annotator.THIN)
+	
+	
+	def draw_fft(self, frame, fft_data):
+		w = frame.width
+		h = int(frame.height * Annotator.FFT_HEIGHT)
+		x = 0
+		y = frame.height
+		
+		max_magnitude = max(d[1][0] for d in fft_data)
+		
+		line = []
+		for num, data in enumerate(fft_data):
+			point_x = (w * num) / (len(fft_data) - 1)
+			point_y = int(y - ((h * data[1][0]) / max_magnitude))
+			
+			line.append((point_x, point_y))
+		
+		cv.PolyLine(frame, [line], False, self.get_colour()[0], 3)
+		
+		# Label the largest bin
+		max_bin = max(range(len(fft_data)), key=(lambda i: fft_data[i][1][0]))
+		
+		x = (w * max_bin) / (len(fft_data) - 1)
+		y = int(y - ((h * fft_data[max_bin][1][0]) / max_magnitude))
+		c = self.get_colour()
+		text = "%0.1f"%fft_data[max_bin][0]
+		
+		cv.PutText(frame, text, (x,y), self.small_font_outline, c[1])
+		cv.PutText(frame, text, (x,y), self.small_font, c[0])
+		
+
+
+class Program(object):
+	
+	def __init__(self,
+	             webcam = 0,
+	             sample_duration = 10,
+	             window_title = "Heart Monitor"):
+		"""
+		Program to monitor heartrates using a webcam.
+		"""
+		
+		self.cam           = Camera(webcam)
+		self.face_detector = FaceDetector(*self.cam.get_size())
+		self.face_tracker  = None
+		self.heart_monitor = HeartMonitor(sample_duration, fps = self.cam.get_fps())
+		self.annotator     = Annotator()
+		self.window        = window_title
+		
+		cv.NamedWindow(self.window)
+		
+		self.show_bpm      = True
+		self.show_face     = True
+		self.show_forehead = True
+		self.show_fft      = True
+	
+	
+	def find_face(self, frame):
+		# Try and find a face
+		face = self.face_detector.get_best_face(frame)
+		
+		if face is not None:
+			# Track the new face
+			self.face_tracker = FaceTracker(frame, face[0])
+	
+	
+	def sample_frame(self, frame):
+		# Get an average of the green channel in on the forehead
+		cv.SetImageROI(frame, self.face_tracker.get_forehead())
+		sample = cv.Avg(frame)[1]
+		cv.ResetImageROI(frame)
+		
+		return sample
+	
+	
+	def update(self):
+		"""
+		Mainloop body. Returns True unless termination requested.
+		"""
+		
+		frame = self.cam.get_frame()
+		frame_time = time.time()
+		
+		if self.face_tracker is None:
+			# No face known
+			self.find_face(frame)
+		else:
+			# Track the face
+			self.face_tracker.update(frame_time, frame)
+			self.annotator.set_face(self.face_tracker.get_face())
+			self.annotator.set_forehead(self.face_tracker.get_forehead())
+			
+			# Update the heart monitor
+			self.heart_monitor.add_sample(frame_time, self.sample_frame(frame))
+			self.annotator.set_busy(not self.heart_monitor.buf_full)
+			
+			if self.heart_monitor.ready:
+				bpm, phase, fft_data = self.heart_monitor.get_bpm()
+				
+				# Draw the OSD
+				if fft_data and self.show_fft:
+					self.annotator.draw_fft(frame, fft_data)
+				
+				if self.show_face:
+					self.annotator.draw_face(frame)
+				
+				if self.show_forehead:
+					self.annotator.draw_forehead(frame)
+				
+				if self.show_bpm:
+					self.annotator.draw_bpm(frame, bpm)
+					self.annotator.draw_phase(frame, phase)
+		
+		# Display the (possibly annotated) frame
+		cv.ShowImage(self.window, frame)
+		
+		# Handle keypresses
+		key = cv.WaitKey(10) & 255
+		if key == 27: # Escape
+			# Exit
+			return False
+		elif key == ord("r"):
+			# Reset the heart monitor and face tracker
+			self.face_tracker = None
+			self.heart_monitor.reset()
+		elif key == ord(" "):
+			# Re-find the face
+			self.face_tracker = None
+		elif key == ord("1"):
+			self.show_face = not self.show_face
+		elif key == ord("2"):
+			self.show_forehead = not self.show_forehead
+		elif key == ord("3"):
+			self.show_fft = not self.show_fft
+		elif key == ord("4"):
+			self.show_bpm = not self.show_bpm
+		
+		return True
+	
+	
+	def run(self):
+		"""
+		Blocks running the mainloop
+		"""
+		
+		while self.update():
+			pass
+
+
+if __name__=="__main__":
+	Program().run()
+
