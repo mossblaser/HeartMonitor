@@ -256,7 +256,7 @@ class FaceTracker(object):
 		x -= (w / 2.0)
 		y -= (h / 2.0)
 		
-		return (x,y,w,h)
+		return tuple(map(int, (x,y,w,h)))
 
 
 class Annotator(object):
